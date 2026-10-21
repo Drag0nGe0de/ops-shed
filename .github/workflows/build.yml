@@ -56,7 +56,8 @@ jobs:
           N="${TAG##*-rust.}"
           if [ "$N" != "$TAG" ]; then export ABYSSAL_RUST_TRAIN="$N"; fi
           cargo build --release --target aarch64-apple-darwin
-          ./target/aarch64-apple-darwin/release/abyssallauncher --version
+          BIN_NAME=$(awk '/^\[\[bin\]\]/{f=1} f && /^name = /{gsub(/"/,"",$3); print $3; exit}' $(grep -rl '^\[\[bin\]\]' rust/crates/*/Cargo.toml | head -1))
+          ./target/aarch64-apple-darwin/release/"$BIN_NAME" --version
 
       - name: Build (x86_64, second half of the universal pair)
         working-directory: rust
@@ -90,8 +91,9 @@ jobs:
           # Discovery: the installed binary name and the version come from
           # the source tree, never from assumptions.
           VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' rust/Cargo.toml | head -n1)
-          BIN_NAME=abyssallauncher
+          BIN_NAME=$(awk '/^\[\[bin\]\]/{f=1} f && /^name = /{gsub(/"/,"",$3); print $3; exit}' $(grep -rl '^\[\[bin\]\]' rust/crates/*/Cargo.toml | head -1))
           echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+          echo "BIN_NAME=$BIN_NAME" >> "$GITHUB_ENV"
 
           lipo -create \
             rust/target/aarch64-apple-darwin/release/"$BIN_NAME" \
