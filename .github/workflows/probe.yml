@@ -24,8 +24,8 @@ jobs:
         run: |
           set -e
           mkdir -p bundle/Test.app/Contents/MacOS bundle/Test.app/Contents/Resources
-          printf '#!/bin/sh\nexit 0\n' > bundle/Test.app/Contents/MacOS/test
-          chmod +x bundle/Test.app/Contents/MacOS/test
+          # a real Mach-O main executable: codesign refuses a script bundle
+          cp /bin/echo bundle/Test.app/Contents/MacOS/Test
           printf 'probe\n' > bundle/Test.app/Contents/Resources/data.bin
           dd if=/dev/urandom of=bundle/Test.app/Contents/Resources/pad.bin bs=1024 count=512 2>/dev/null
           codesign --sign '-' --force --options runtime bundle/Test.app
