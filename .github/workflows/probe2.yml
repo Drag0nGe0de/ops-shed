@@ -26,10 +26,9 @@ jobs:
           set -e
           APP="Abyssal Test.app"
           mkdir -p "bundle/$APP/Contents/MacOS" "bundle/$APP/Contents/Resources/jars"
-          # fat universal main executable from two real slices
-          cp /bin/echo /tmp/arm64-bin
-          cp /bin/ls /tmp/x86-bin
-          lipo -create /tmp/arm64-bin /tmp/x86-bin -output "bundle/$APP/Contents/MacOS/AbyssalTest"
+          # real universal main executable: two-arch clang build
+          printf 'int main(void){return 0;}\n' > /tmp/t.c
+          clang -arch arm64 -arch x86_64 -o "bundle/$APP/Contents/MacOS/AbyssalTest" /tmp/t.c
           # ~20 MB of incompressible resources = worst-case lzma input
           dd if=/dev/urandom of="bundle/$APP/Contents/Resources/pad.bin" bs=1048576 count=20 2>/dev/null
           printf 'probe\n' > "bundle/$APP/Contents/Resources/data.bin"
