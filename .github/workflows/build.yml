@@ -104,12 +104,6 @@ jobs:
           ART_PREFIX: ${{ secrets.ART_PREFIX }}
         run: |
           set -e
-          # A/B artifact names carry the allocator feature as a suffix so a
-          # mimalloc DMG can never be confused with the system build.
-          SUFFIX=""
-          if [ -n "$ALLOC" ] && [ "$ALLOC" != "system" ]; then SUFFIX="-${ALLOC}"; fi
-          ZIP_NAME="${ART_PREFIX}-${TAG}-macOS-universal${SUFFIX}.zip"
-          DMG_NAME="${ART_PREFIX}-Rust-${TAG}-macOS-universal${SUFFIX}.dmg"
           # Discovery: the installed binary name and the version come from
           # the source tree, never from assumptions.
           VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' rust/Cargo.toml | head -n1)
@@ -152,19 +146,66 @@ jobs:
           cp -R rust/assets/instance_icons "bundle/$APP/Contents/Resources/instance_icons"
           cp jarbuild/out/*.jar "bundle/$APP/Contents/Resources/jars/"
 
-          sudo codesign --sign '-' --deep --force \
+      - name: Codesign
+        shell: bash
+        env:
+          APP_DISPLAY: ${{ secrets.APP_DISPLAY }}
+          BUNDLE_ID: ${{ secrets.BUNDLE_ID }}
+        run: |
+          set -e
+          APP="$APP_DISPLAY.app"
+          # NO sudo here: probe 2 convicted sudo codesign as the trigger that
+          # makes the following hdiutil create hang forever (both sudo arms
+          # hit the 420 s alarm, both non-sudo arms finished in ~18 s with
+          # everything else identical). Ad-hoc signing needs no privileges:
+          # the runner user owns the checkout and every staged file.
+          codesign --sign '-' --deep --force \
             --entitlements program_info/AdhocSignedApp.entitlements \
             --options runtime "bundle/$APP"
+          codesign -dv "bundle/$APP" 2>&1 | head -3 || true
 
+      - name: Zip
+        shell: bash
+        env:
+          APP_DISPLAY: ${{ secrets.APP_DISPLAY }}
+          ART_PREFIX: ${{ secrets.ART_PREFIX }}
+        run: |
+          set -e
+          APP="$APP_DISPLAY.app"
+          SUFFIX=""
+          if [ -n "$ALLOC" ] && [ "$ALLOC" != "system" ]; then SUFFIX="-${ALLOC}"; fi
+          ZIP_NAME="${ART_PREFIX}-${TAG}-macOS-universal${SUFFIX}.zip"
           cd bundle
           zip -qry "../$ZIP_NAME" "$APP"
           cd ..
+          ls -la "$ZIP_NAME"
 
-          hdiutil create \
+      - name: DMG (bounded)
+        shell: bash
+        env:
+          APP_DISPLAY: ${{ secrets.APP_DISPLAY }}
+          ART_PREFIX: ${{ secrets.ART_PREFIX }}
+        run: |
+          set -e
+          SUFFIX=""
+          if [ -n "$ALLOC" ] && [ "$ALLOC" != "system" ]; then SUFFIX="-${ALLOC}"; fi
+          DMG_NAME="${ART_PREFIX}-Rust-${TAG}-macOS-universal${SUFFIX}.dmg"
+          # bounded: a hung hdiutil must die loud here, not eat the job
+          bounded() { perl -e 'alarm shift; exec @ARGV or die "exec: $!"' "$@"; }
+          echo "starting hdiutil at $(date -u +%H:%M:%S)"
+          S=$(date +%s)
+          if bounded 600 hdiutil create \
               -volname "${APP_DISPLAY} ${VERSION}" \
               -srcfolder bundle \
               -ov -format ULMO \
-              "$DMG_NAME"
+              "$DMG_NAME"; then
+            echo "dmg ok in $(( $(date +%s) - S ))s"
+          else
+            RC=$?
+            echo "hdiutil create FAILED rc=$RC after $(( $(date +%s) - S ))s (124 = alarm); build fails loud instead of hanging" >&2
+            exit 1
+          fi
+          ls -la "$DMG_NAME"
 
       - name: Checksums
         env:
@@ -177,7 +218,6 @@ jobs:
           DMG_NAME="${ART_PREFIX}-Rust-${TAG}-macOS-universal${SUFFIX}.dmg"
           shasum -a 256 "$ZIP_NAME" > "$ZIP_NAME.sha256"
           shasum -a 256 "$DMG_NAME" > "$DMG_NAME.sha256"
-
       - name: Save build output artifact
         uses: actions/upload-artifact@v4
         with:
