@@ -1,0 +1,112 @@
+name: Probe 2
+
+# Scale/replica probes: probe 1 cleared every DMG writer on a tiny bundle,
+# but the real Package step stalled 32 minutes inside hdiutil ULMO. These
+# arms replicate the real bundle shape (fat universal binary, jar files,
+# spaces in the app name and volume name, sudo codesign --deep with
+# entitlements) to bisect the hang.
+
+on:
+  workflow_dispatch: {}
+
+permissions: {}
+
+jobs:
+  dmg:
+    name: ${{ matrix.method }}
+    runs-on: macos-26
+    timeout-minutes: 12
+    strategy:
+      fail-fast: false
+      matrix:
+        method: [replica-exact, replica-nosudo, replica-nodeep, plain-big]
+    steps:
+      - name: Build a realistic test bundle
+        run: |
+          set -e
+          APP="Abyssal Test.app"
+          mkdir -p "bundle/$APP/Contents/MacOS" "bundle/$APP/Contents/Resources/jars"
+          # fat universal main executable from two real slices
+          cp /bin/echo /tmp/arm64-bin
+          cp /bin/ls /tmp/x86-bin
+          lipo -create /tmp/arm64-bin /tmp/x86-bin -output "bundle/$APP/Contents/MacOS/AbyssalTest"
+          # ~20 MB of incompressible resources = worst-case lzma input
+          dd if=/dev/urandom of="bundle/$APP/Contents/Resources/pad.bin" bs=1048576 count=20 2>/dev/null
+          printf 'probe\n' > "bundle/$APP/Contents/Resources/data.bin"
+          # jar-shaped members (plain zips; the DMG writer does not care)
+          for j in NewLaunch NewLaunchLegacy JavaCheck; do
+            (cd bundle && zip -qry /tmp/$j.jar "$APP/Contents/Resources/data.bin")
+            cp /tmp/$j.jar "bundle/$APP/Contents/Resources/jars/$j.jar"
+          done
+          cat > /tmp/probe.entitlements <<EOF
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>com.apple.security.cs.disable-library-validation</key>
+            <true/>
+            <key>com.apple.security.device.audio-input</key>
+            <true/>
+            <key>com.apple.security.device.camera</key>
+            <true/>
+          </dict>
+          </plist>
+          EOF
+          case "${{ matrix.method }}" in
+            replica-exact)
+              sudo codesign --sign '-' --deep --force \
+                --entitlements /tmp/probe.entitlements \
+                --options runtime "bundle/$APP" ;;
+            replica-nosudo)
+              codesign --sign '-' --deep --force \
+                --entitlements /tmp/probe.entitlements \
+                --options runtime "bundle/$APP" ;;
+            replica-nodeep)
+              sudo codesign --sign '-' --force \
+                --entitlements /tmp/probe.entitlements \
+                --options runtime "bundle/$APP" ;;
+            plain-big)
+              codesign --sign '-' --force "bundle/$APP" ;;
+          esac
+          echo "codesign done: ${{ matrix.method }}"
+          codesign -dv "bundle/$APP" 2>&1 | head -2 || true
+
+      - name: Zip then DMG (ULMO)
+        run: |
+          set -e
+          APP="Abyssal Test.app"
+          cd bundle
+          zip -qry "../AbyssalTest-v0-macOS-universal.zip" "$APP"
+          cd ..
+          echo "zip done, starting hdiutil at $(date -u +%H:%M:%S)"
+          bounded() { perl -e 'alarm shift; exec @ARGV or die "exec: $!"' "$@"; }
+          S=$(date +%s)
+          if bounded 420 hdiutil create \
+              -volname "Abyssal Test 12.6.19" \
+              -srcfolder bundle \
+              -ov -format ULMO \
+              "AbyssalTest-v0-macOS-universal.dmg"; then
+            D=$(( $(date +%s) - S ))
+            echo "RESULT ${{ matrix.method }}: hdiutil ULMO OK in ${D}s" >> "$GITHUB_STEP_SUMMARY"
+          else
+            RC=$?
+            echo "RESULT ${{ matrix.method }}: hdiutil ULMO FAILED rc=$RC after $(( $(date +%s) - S ))s (124 = alarm)" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          ls -la AbyssalTest-v0-macOS-universal.dmg
+
+      - name: Verify the image mounts
+        if: always()
+        run: |
+          if [ ! -f AbyssalTest-v0-macOS-universal.dmg ]; then
+            echo "no dmg produced" >> "$GITHUB_STEP_SUMMARY"; exit 0
+          fi
+          bounded() { perl -e 'alarm shift; exec @ARGV or die "exec: $!"' "$@"; }
+          mkdir -p /tmp/probe_mnt
+          if bounded 120 hdiutil attach -readonly -nobrowse -mountpoint /tmp/probe_mnt AbyssalTest-v0-macOS-universal.dmg; then
+            echo "attach OK" >> "$GITHUB_STEP_SUMMARY"
+            ls /tmp/probe_mnt >> "$GITHUB_STEP_SUMMARY"
+            bounded 60 hdiutil detach /tmp/probe_mnt || true
+          else
+            echo "ATTACH FAILED/timed out" >> "$GITHUB_STEP_SUMMARY"
+          fi
