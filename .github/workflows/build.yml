@@ -1,0 +1,162 @@
+name: Build
+
+# CI sandbox: builds a private-source macOS app from a source tag and
+# uploads the packaged output. No source code lives in this repository.
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Source tag to build
+        type: string
+        required: true
+
+permissions: {}
+
+jobs:
+  macos:
+    name: Build (macOS universal)
+    runs-on: macos-26
+    timeout-minutes: 120
+    env:
+      TAG: ${{ inputs.tag }}
+      CARGO_TERM_COLOR: never
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v6
+        with:
+          repository: ${{ secrets.SRC_REPO }}
+          ref: ${{ inputs.tag }}
+          token: ${{ secrets.SRC_TOKEN }}
+          persist-credentials: false
+
+      - name: Toolchain
+        run: |
+          rustup toolchain install stable --profile minimal --no-self-update
+          rustup default stable
+          rustup target add aarch64-apple-darwin x86_64-apple-darwin
+
+      - name: Java for the launch jars
+        run: |
+          brew install temurin@17
+          echo "JAVA_HOME=$(/usr/libexec/java_home -v 17)" >> "$GITHUB_ENV"
+          echo "$JAVA_HOME/bin" >> "$GITHUB_PATH"
+
+      - name: Lints (panic-free gate)
+        working-directory: rust
+        run: cargo clippy --workspace --all-targets -- -D clippy::unwrap_used -D clippy::expect_used -D clippy::panic
+
+      - name: Tests
+        working-directory: rust
+        run: cargo test --workspace
+
+      - name: Build (arm64, smoke + first half of the universal pair)
+        working-directory: rust
+        run: |
+          N="${TAG##*-rust.}"
+          if [ "$N" != "$TAG" ]; then export ABYSSAL_RUST_TRAIN="$N"; fi
+          cargo build --release --target aarch64-apple-darwin
+          ./target/aarch64-apple-darwin/release/abyssallauncher --version
+
+      - name: Build (x86_64, second half of the universal pair)
+        working-directory: rust
+        run: |
+          N="${TAG##*-rust.}"
+          if [ "$N" != "$TAG" ]; then export ABYSSAL_RUST_TRAIN="$N"; fi
+          cargo build --release --target x86_64-apple-darwin
+
+      - name: Launch jars (javac, java 8 bytecode)
+        run: |
+          set -e
+          mkdir -p jarbuild/nl jarbuild/nll jarbuild/jc jarbuild/out
+          javac --release 8 -d jarbuild/nl $(find libraries/launcher/org -name '*.java')
+          printf 'Main-Class: org.prismlauncher.EntryPoint\n' > jarbuild/nl.mf
+          jar cfm jarbuild/out/NewLaunch.jar jarbuild/nl.mf -C jarbuild/nl .
+          javac --release 8 -d jarbuild/nll $(find libraries/launcher/legacy -name '*.java')
+          printf 'Main-Class: org.prismlauncher.EntryPoint\nClass-Path: NewLaunch.jar\n' > jarbuild/nll.mf
+          jar cfm jarbuild/out/NewLaunchLegacy.jar jarbuild/nll.mf -C jarbuild/nll .
+          javac --release 8 -d jarbuild/jc libraries/javacheck/JavaCheck.java
+          printf 'Main-Class: JavaCheck\n' > jarbuild/jc.mf
+          jar cfm jarbuild/out/JavaCheck.jar jarbuild/jc.mf -C jarbuild/jc .
+
+      - name: Package
+        shell: bash
+        env:
+          APP_DISPLAY: ${{ secrets.APP_DISPLAY }}
+          BUNDLE_ID: ${{ secrets.BUNDLE_ID }}
+          ART_PREFIX: ${{ secrets.ART_PREFIX }}
+        run: |
+          set -e
+          # Discovery: the installed binary name and the version come from
+          # the source tree, never from assumptions.
+          VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' rust/Cargo.toml | head -n1)
+          BIN_NAME=abyssallauncher
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+
+          lipo -create \
+            rust/target/aarch64-apple-darwin/release/"$BIN_NAME" \
+            rust/target/x86_64-apple-darwin/release/"$BIN_NAME" \
+            -output "$BIN_NAME"
+
+          APP="$APP_DISPLAY.app"
+          mkdir -p "bundle/$APP/Contents/MacOS" "bundle/$APP/Contents/Resources/jars"
+          cp "$BIN_NAME" "bundle/$APP/Contents/MacOS/"
+
+          cat > "bundle/$APP/Contents/Info.plist" <<PLIST
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>CFBundleName</key><string>${APP_DISPLAY}</string>
+            <key>CFBundleDisplayName</key><string>${APP_DISPLAY}</string>
+            <key>CFBundleIdentifier</key><string>${BUNDLE_ID}</string>
+            <key>CFBundleExecutable</key><string>${BIN_NAME}</string>
+            <key>CFBundleIconFile</key><string>appicon</string>
+            <key>CFBundlePackageType</key><string>APPL</string>
+            <key>CFBundleShortVersionString</key><string>${VERSION}</string>
+            <key>CFBundleVersion</key><string>${VERSION}</string>
+            <key>LSMinimumSystemVersion</key><string>12.0</string>
+            <key>NSHighResolutionCapable</key><true/>
+            <key>NSPrincipalClass</key><string>NSApplication</string>
+          </dict>
+          </plist>
+          PLIST
+
+          cp rust/assets/appicon.png "bundle/$APP/Contents/Resources/appicon.png"
+          cp -R rust/assets/fonts "bundle/$APP/Contents/Resources/fonts"
+          cp -R rust/assets/icons "bundle/$APP/Contents/Resources/icons"
+          cp -R rust/assets/instance_icons "bundle/$APP/Contents/Resources/instance_icons"
+          cp jarbuild/out/*.jar "bundle/$APP/Contents/Resources/jars/"
+
+          sudo codesign --sign '-' --deep --force \
+            --entitlements program_info/AdhocSignedApp.entitlements \
+            --options runtime "bundle/$APP"
+
+          cd bundle
+          zip -qry "../${ART_PREFIX}-${TAG}-macOS-universal.zip" "$APP"
+          cd ..
+
+          hdiutil create \
+              -volname "${APP_DISPLAY} ${VERSION}" \
+              -srcfolder bundle \
+              -ov -format ULMO \
+              "${ART_PREFIX}-Rust-${TAG}-macOS-universal.dmg"
+
+      - name: Checksums
+        env:
+          ART_PREFIX: ${{ secrets.ART_PREFIX }}
+        run: |
+          set -e
+          shasum -a 256 "${ART_PREFIX}-${TAG}-macOS-universal.zip" > "${ART_PREFIX}-${TAG}-macOS-universal.zip.sha256"
+          shasum -a 256 "${ART_PREFIX}-Rust-${TAG}-macOS-universal.dmg" > "${ART_PREFIX}-Rust-${TAG}-macOS-universal.dmg.sha256"
+
+      - name: Save build output artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: rust-build-output
+          path: |
+            *.zip
+            *.sha256
+            *.dmg
+          retention-days: 1
+          if-no-files-found: error
