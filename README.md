@@ -1,0 +1,2 @@
+# ops-shed
+internal automation
