@@ -1,0 +1,103 @@
+name: Probe
+
+# Bounded probes for the DMG writer on this runner image: the build job's
+# hdiutil ULMO create stalled for 32 minutes and had to be killed. Each
+# matrix arm tests one writer with a hard time bound so no arm can eat the
+# job, and every result lands in the step summary.
+
+on:
+  workflow_dispatch: {}
+
+permissions: {}
+
+jobs:
+  dmg:
+    name: ${{ matrix.method }}
+    runs-on: macos-26
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        method: [imgutil-ulmo, hdiutil-ulmo, hdiutil-udzo, hdiutil-ulfo]
+    steps:
+      - name: Make a signed test bundle
+        run: |
+          set -e
+          mkdir -p bundle/Test.app/Contents/MacOS bundle/Test.app/Contents/Resources
+          printf '#!/bin/sh\nexit 0\n' > bundle/Test.app/Contents/MacOS/test
+          chmod +x bundle/Test.app/Contents/MacOS/test
+          printf 'probe\n' > bundle/Test.app/Contents/Resources/data.bin
+          dd if=/dev/urandom of=bundle/Test.app/Contents/Resources/pad.bin bs=1024 count=512 2>/dev/null
+          codesign --sign '-' --force --options runtime bundle/Test.app
+          codesign -dv bundle/Test.app 2>&1 | head -3
+
+      - name: ${{ matrix.method }}
+        run: |
+          set -e
+          # perl alarm is the bounded-run primitive (no coreutils guarantee)
+          bounded() { perl -e 'alarm shift; exec @ARGV or die "exec: $!"' "$@"; }
+          case "${{ matrix.method }}" in
+            imgutil-ulmo)
+              if ! command -v imgutil >/dev/null; then
+                echo "imgutil: NOT PRESENT on image" >> "$GITHUB_STEP_SUMMARY"
+                exit 0
+              fi
+              imgutil create --help > /tmp/imgutil_help.txt 2>&1 || true
+              head -30 /tmp/imgutil_help.txt
+              S=$(date +%s)
+              if bounded 240 imgutil create --format ulmo --output out.dmg bundle; then
+                echo "imgutil ulmo: OK in $(( $(date +%s) - S ))s" >> "$GITHUB_STEP_SUMMARY"
+              else
+                RC=$?
+                echo "imgutil ulmo: FAILED rc=$RC after $(( $(date +%s) - S ))s (124 = alarm)" >> "$GITHUB_STEP_SUMMARY"
+                exit 0
+              fi
+              ;;
+            hdiutil-ulmo)
+              S=$(date +%s)
+              if bounded 240 hdiutil create -volname t -srcfolder bundle -ov -format ULMO out.dmg; then
+                echo "hdiutil ULMO: OK in $(( $(date +%s) - S ))s" >> "$GITHUB_STEP_SUMMARY"
+              else
+                RC=$?
+                echo "hdiutil ULMO: FAILED rc=$RC after $(( $(date +%s) - S ))s (124 = alarm)" >> "$GITHUB_STEP_SUMMARY"
+                exit 0
+              fi
+              ;;
+            hdiutil-udzo)
+              S=$(date +%s)
+              if bounded 240 hdiutil create -volname t -srcfolder bundle -ov -format UDZO out.dmg; then
+                echo "hdiutil UDZO: OK in $(( $(date +%s) - S ))s" >> "$GITHUB_STEP_SUMMARY"
+              else
+                RC=$?
+                echo "hdiutil UDZO: FAILED rc=$RC after $(( $(date +%s) - S ))s (124 = alarm)" >> "$GITHUB_STEP_SUMMARY"
+                exit 0
+              fi
+              ;;
+            hdiutil-ulfo)
+              S=$(date +%s)
+              if bounded 240 hdiutil create -volname t -srcfolder bundle -ov -format ULFO out.dmg; then
+                echo "hdiutil ULFO: OK in $(( $(date +%s) - S ))s" >> "$GITHUB_STEP_SUMMARY"
+              else
+                RC=$?
+                echo "hdiutil ULFO: FAILED rc=$RC after $(( $(date +%s) - S ))s (124 = alarm)" >> "$GITHUB_STEP_SUMMARY"
+                exit 0
+              fi
+              ;;
+          esac
+
+      - name: Verify the image mounts
+        run: |
+          if [ ! -f out.dmg ]; then
+            echo "no out.dmg produced" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          bounded 120 hdiutil attach -readonly -nobrowse -mountpoint /tmp/probe_mnt out.dmg || {
+            echo "ATTACH FAILED/timed out" >> "$GITHUB_STEP_SUMMARY"; exit 0; }
+          echo "attach OK; contents:" >> "$GITHUB_STEP_SUMMARY"
+          ls /tmp/probe_mnt >> "$GITHUB_STEP_SUMMARY" 2>&1
+          bounded 60 hdiutil detach /tmp/probe_mnt || true
+          echo "detach attempted" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Report size
+        if: always()
+        run: ls -la out.dmg 2>/dev/null || true
