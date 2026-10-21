@@ -10,6 +10,10 @@ on:
         description: Source tag to build
         type: string
         required: true
+      alloc:
+        description: Allocator feature for A/B builds (empty or system = default)
+        type: string
+        default: ""
 
 permissions: {}
 
@@ -20,6 +24,7 @@ jobs:
     timeout-minutes: 120
     env:
       TAG: ${{ inputs.tag }}
+      ALLOC: ${{ inputs.alloc }}
       CARGO_TERM_COLOR: never
     steps:
       - name: Checkout source
@@ -55,7 +60,14 @@ jobs:
         run: |
           N="${TAG##*-rust.}"
           if [ "$N" != "$TAG" ]; then export ABYSSAL_RUST_TRAIN="$N"; fi
-          cargo build --release --target aarch64-apple-darwin
+          # A/B builds: the allocator feature lives on the app crate, so the
+          # feature build selects it with -p. The default build stays a plain
+          # full-workspace build, byte-for-byte the recipe that always ran.
+          if [ -n "$ALLOC" ] && [ "$ALLOC" != "system" ]; then
+            cargo build --release --target aarch64-apple-darwin -p abyssal-app --features "$ALLOC"
+          else
+            cargo build --release --target aarch64-apple-darwin
+          fi
           BIN_NAME=$(awk '/^\[\[bin\]\]/{f=1} f && /^name = /{gsub(/"/,"",$3); print $3; exit}' $(grep -rl '^\[\[bin\]\]' rust/crates/*/Cargo.toml | head -1))
           ./target/aarch64-apple-darwin/release/"$BIN_NAME" --version
 
@@ -64,7 +76,11 @@ jobs:
         run: |
           N="${TAG##*-rust.}"
           if [ "$N" != "$TAG" ]; then export ABYSSAL_RUST_TRAIN="$N"; fi
-          cargo build --release --target x86_64-apple-darwin
+          if [ -n "$ALLOC" ] && [ "$ALLOC" != "system" ]; then
+            cargo build --release --target x86_64-apple-darwin -p abyssal-app --features "$ALLOC"
+          else
+            cargo build --release --target x86_64-apple-darwin
+          fi
 
       - name: Launch jars (javac, java 8 bytecode)
         run: |
@@ -88,6 +104,12 @@ jobs:
           ART_PREFIX: ${{ secrets.ART_PREFIX }}
         run: |
           set -e
+          # A/B artifact names carry the allocator feature as a suffix so a
+          # mimalloc DMG can never be confused with the system build.
+          SUFFIX=""
+          if [ -n "$ALLOC" ] && [ "$ALLOC" != "system" ]; then SUFFIX="-${ALLOC}"; fi
+          ZIP_NAME="${ART_PREFIX}-${TAG}-macOS-universal${SUFFIX}.zip"
+          DMG_NAME="${ART_PREFIX}-Rust-${TAG}-macOS-universal${SUFFIX}.dmg"
           # Discovery: the installed binary name and the version come from
           # the source tree, never from assumptions.
           VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' rust/Cargo.toml | head -n1)
@@ -135,22 +157,26 @@ jobs:
             --options runtime "bundle/$APP"
 
           cd bundle
-          zip -qry "../${ART_PREFIX}-${TAG}-macOS-universal.zip" "$APP"
+          zip -qry "../$ZIP_NAME" "$APP"
           cd ..
 
           hdiutil create \
               -volname "${APP_DISPLAY} ${VERSION}" \
               -srcfolder bundle \
               -ov -format ULMO \
-              "${ART_PREFIX}-Rust-${TAG}-macOS-universal.dmg"
+              "$DMG_NAME"
 
       - name: Checksums
         env:
           ART_PREFIX: ${{ secrets.ART_PREFIX }}
         run: |
           set -e
-          shasum -a 256 "${ART_PREFIX}-${TAG}-macOS-universal.zip" > "${ART_PREFIX}-${TAG}-macOS-universal.zip.sha256"
-          shasum -a 256 "${ART_PREFIX}-Rust-${TAG}-macOS-universal.dmg" > "${ART_PREFIX}-Rust-${TAG}-macOS-universal.dmg.sha256"
+          SUFFIX=""
+          if [ -n "$ALLOC" ] && [ "$ALLOC" != "system" ]; then SUFFIX="-${ALLOC}"; fi
+          ZIP_NAME="${ART_PREFIX}-${TAG}-macOS-universal${SUFFIX}.zip"
+          DMG_NAME="${ART_PREFIX}-Rust-${TAG}-macOS-universal${SUFFIX}.dmg"
+          shasum -a 256 "$ZIP_NAME" > "$ZIP_NAME.sha256"
+          shasum -a 256 "$DMG_NAME" > "$DMG_NAME.sha256"
 
       - name: Save build output artifact
         uses: actions/upload-artifact@v4
