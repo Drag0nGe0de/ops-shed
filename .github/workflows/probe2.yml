@@ -29,6 +29,18 @@ jobs:
           # real universal main executable: two-arch clang build
           printf 'int main(void){return 0;}\n' > /tmp/t.c
           clang -arch arm64 -arch x86_64 -o "bundle/$APP/Contents/MacOS/AbyssalTest" /tmp/t.c
+          # codesign requires an Info.plist in Contents/
+          cat > "bundle/$APP/Contents/Info.plist" <<PLIST
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>CFBundleExecutable</key><string>AbyssalTest</string>
+            <key>CFBundleIdentifier</key><string>org.probe.test</string>
+            <key>CFBundlePackageType</key><string>APPL</string>
+          </dict>
+          </plist>
+          PLIST
           # ~20 MB of incompressible resources = worst-case lzma input
           dd if=/dev/urandom of="bundle/$APP/Contents/Resources/pad.bin" bs=1048576 count=20 2>/dev/null
           printf 'probe\n' > "bundle/$APP/Contents/Resources/data.bin"
