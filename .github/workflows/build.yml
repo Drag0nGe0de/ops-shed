@@ -136,6 +136,12 @@ jobs:
             <key>LSMinimumSystemVersion</key><string>12.0</string>
             <key>NSHighResolutionCapable</key><true/>
             <key>NSPrincipalClass</key><string>NSApplication</string>
+            <key>NSMicrophoneUsageDescription</key>
+            <string>A Minecraft mod wants to access your microphone.</string>
+            <key>NSCameraUsageDescription</key>
+            <string>A Minecraft mod wants to access your camera.</string>
+            <key>NSLocalNetworkUsageDescription</key>
+            <string>Minecraft servers on your local network (LAN worlds and voice chat) need network access.</string>
           </dict>
           </plist>
           PLIST
