@@ -142,6 +142,11 @@ jobs:
             <string>A Minecraft mod wants to access your camera.</string>
             <key>NSLocalNetworkUsageDescription</key>
             <string>Minecraft servers on your local network (LAN worlds and voice chat) need network access.</string>
+            <key>LSEnvironment</key>
+            <dict>
+              <key>MallocGuardEdges</key><string>1</string>
+              <key>MallocScribble</key><string>1</string>
+            </dict>
           </dict>
           </plist>
           PLIST
